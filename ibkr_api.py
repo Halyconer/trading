@@ -35,7 +35,6 @@ BASE_URL = f"{HOST}/v1/api"
 ACCOUNT_ID = os.getenv("ACCOUNT_ID") 
 
 # --- API Functions ---
-
 def check_auth_status():
     """Checks the current authentication and connection status."""
     url = f"{BASE_URL}/iserver/auth/status"
@@ -110,23 +109,84 @@ def get_account_summary(account_id):
     except requests.exceptions.RequestException as e:
         print(f"An error occurred while getting the account summary: {e}")
 
-def get_positions(account_id, page_id=0, model=None, sort=None, direction=None, period=None):
-    """Retrieves a list of positions for the given account.
+def get_position_by_conid(account_id, conid):
+    """Retrieves detailed position information for a specific contract.
     
     Args:
         account_id: String. The account ID.
-        page_id: String or int. The page number (0-indexed, max 100 positions per page).
+        conid: String or int. The contract ID to get position for.
+    
+    Returns:
+        Position data with details like position size, market price, P&L, etc.
+    """
+    if not account_id or not conid:
+        print("ERROR: account_id and conid are required")
+        return None
+    
+    url = f"{BASE_URL}/portfolio/{account_id}/position/{conid}"
+    print(f"Getting position for conid {conid}: GET {url}")
+    
+    try:
+        response = requests.get(url, headers=get_headers("GET"), verify=False, timeout=10)
+        response.raise_for_status()
+        
+        position_data = response.json()
+        
+        # Display key position information
+        if position_data:
+            print(f"\n--- POSITION DATA FOR CONID {conid} ---")
+            
+            # Key fields to display
+            ticker = position_data.get("ticker", "N/A")
+            position = position_data.get("position", 0)
+            mkt_price = position_data.get("mktPrice", 0)
+            mkt_value = position_data.get("mktValue", 0)
+            avg_price = position_data.get("avgPrice", 0)
+            unrealized_pnl = position_data.get("unrealizedPnl", 0)
+            realized_pnl = position_data.get("realizedPnl", 0)
+            currency = position_data.get("currency", "USD")
+            
+            print(f"Ticker: {ticker}")
+            print(f"Position: {position} shares")
+            print(f"Market Price: ${mkt_price} {currency}")
+            print(f"Market Value: ${mkt_value}")
+            print(f"Avg Cost: ${avg_price}/share")
+            print(f"Unrealized P&L: ${unrealized_pnl}")
+            print(f"Realized P&L: ${realized_pnl}")
+            print(f"-----------------------------------\n")
+            
+            return position_data
+        else:
+            print("No position data found")
+            return None
+        
+    except requests.exceptions.RequestException as e:
+        print(f"An error occurred while getting position: {e}")
+        return None
+
+def get_positions(account_id, conids=None, model=None, sort=None, direction=None):
+    """Retrieves near real-time positions for the given account.
+    
+    Uses the newer /portfolio2 endpoint which provides near-real-time updates
+    and removes caching found in the older endpoint.
+    
+    Args:
+        account_id: String. The account ID.
+        conids: List of contract IDs to filter (optional).
         model: String. Optional. Code for the model portfolio to compare against.
         sort: String. Optional. Column to sort by.
         direction: String. Optional. 'a' for ascending, 'd' for descending.
-        period: String. Optional. Period for pnl column (1D, 7D, 1M).
+    
+    Returns:
+        List of position data
     """
     if not account_id:
         print("ERROR: account_id is required")
         return None
     
-    url = f"{BASE_URL}/portfolio/{account_id}/positions/{page_id}"
-    print(f"4. Retrieving Positions for {account_id} (Page {page_id}): GET {url}")
+    # Use the newer portfolio2 endpoint for real-time data
+    url = f"{BASE_URL}/portfolio2/{account_id}/positions"
+    print(f"Retrieving positions for {account_id}: GET {url}")
     
     # Build query parameters
     params = {}
@@ -136,18 +196,37 @@ def get_positions(account_id, page_id=0, model=None, sort=None, direction=None, 
         params['sort'] = sort
     if direction:
         params['direction'] = direction
-    if period:
-        params['period'] = period
     
     try:
         response = requests.get(url, headers=get_headers("GET"), params=params, verify=False, timeout=10)
         response.raise_for_status()
         
         positions_data = response.json()
+        
+        # Filter by conids if provided
+        if conids:
+            if not isinstance(conids, list):
+                conids = [conids]
+            positions_data = [p for p in positions_data if p.get("conid") in conids]
+        
         print("\n--- POSITIONS RESPONSE ---")
         print(json.dumps(positions_data, indent=4))
         print("-------------------------\n")
-        print(f"SUCCESS: Positions retrieved for account {account_id}.")
+        
+        # Display summary
+        if positions_data:
+            print("Position Summary:")
+            for pos in positions_data:
+                desc = pos.get("description", "Unknown")
+                position = pos.get("position", 0)
+                mkt_price = pos.get("marketPrice", 0)
+                mkt_value = pos.get("marketValue", 0)
+                unrealized_pnl = pos.get("unrealizedPnl", 0)
+                currency = pos.get("currency", "USD")
+                
+                print(f"  {desc}: {position} shares @ ${mkt_price} = ${mkt_value} {currency} (P&L: ${unrealized_pnl})")
+        
+        print(f"\nSUCCESS: {len(positions_data)} position(s) retrieved for account {account_id}.")
         return positions_data
         
     except requests.exceptions.RequestException as e:
@@ -279,74 +358,62 @@ def get_latest_price(conid):
     
     return None
 
-def place_market_orders(account_id, orders):
-    """Places one or more market orders for the given account.
+def place_market_order(account_id: str, conid: int, side: str = "BUY", cash_qty: float = None, 
+                       quantity: int = None, order_type: str = "MKT", tif: str = "DAY"):
+    """Places a single market order for the given account.
     
     Args:
         account_id: String. The account ID.
-        orders: List of dicts. Each dict should contain:
-            - conid: int. Contract ID (required)
-            - side: String. "BUY" or "SELL" (required)
-            - cashQty: float. Dollar amount to trade (will be converted to shares)
-            - tif: String. Time-In-Force. Default "DAY" (optional)
-            - orderType: String. Default "MKT" (optional)
+        conid: int. Contract ID (required)
+        side: String. "BUY" or "SELL" (default "BUY")
+        cash_qty: float. Dollar amount to trade (will be converted to shares). 
+                 Either cash_qty or quantity must be provided.
+        quantity: int. Number of shares to trade. 
+                 Either cash_qty or quantity must be provided.
+        order_type: String. Order type (default "MKT")
+        tif: String. Time-In-Force (default "DAY")
             
     Returns:
-        Response data from the API
+        Response data from the API, or None if error
     """
 
     if not account_id:
         print("ERROR: account_id is required")
         return None
     
-    if not orders:
-        print("ERROR: orders list is required")
+    if not conid:
+        print("ERROR: conid is required")
         return None
     
-    # Extract conids and get prices for all orders (with fallback to historical)
-    conids = [str(order.get("conid")) for order in orders]
-    
-    # Build a price map: conid -> latest price
-    price_map = {}
-    print("\n--- Fetching prices for all contracts ---")
-    for conid_str in conids:
-        conid = int(conid_str)
+    # Determine quantity
+    if quantity is None:
+        if cash_qty is None:
+            print("ERROR: Either quantity or cash_qty must be provided")
+            return None
+        
+        # Get price and convert cashQty to shares
         price = get_latest_price(conid)
-        if price:
-            price_map[conid] = price
-            print(f"✓ Conid {conid}: Price = ${price}")
-        else:
-            print(f"✗ Conid {conid}: Price not available")
+        if not price:
+            print(f"ERROR: Could not get price for conid {conid}")
+            return None
+        
+        quantity = int(cash_qty / price)
+        print(f"Converting ${cash_qty} to {quantity} shares at ${price}/share for conid {conid}")
     
     url = f"{BASE_URL}/iserver/account/{account_id}/orders"
-    print(f"\n5. Placing Orders for {account_id}: POST {url}\n")
     
-    # Build order objects with quantity calculated from cashQty
-    order_list = []
-    for order in orders:
-        conid = order.get("conid")
-        cash_qty = order.get("cashQty")
-        
-        # Get the price and calculate quantity (rounded down to integer)
-        if conid in price_map and cash_qty:
-            price = price_map[conid]
-            quantity = int(cash_qty / price)  # Round down to integer
-            print(f"  Converting ${cash_qty} to {quantity} shares at ${price}/share for conid {conid}")
-        else:
-            print(f"  ERROR: Could not get price for conid {conid}")
-            quantity = 0
-        
-        order_obj = {
-            "acctId": account_id,
-            "conid": conid,
-            "orderType": order.get("orderType", "MKT"),
-            "side": order.get("side", "BUY"),
-            "tif": order.get("tif", "DAY"),
-            "quantity": quantity,
-        }
-        order_list.append(order_obj)
+    # Build single order object according to IBKR API spec
+    order_obj = {
+        "acctId": account_id,
+        "conid": conid,
+        "orderType": order_type,
+        "side": side,
+        "tif": tif,
+        "quantity": quantity,
+    }
     
-    request_body = {"orders": order_list}
+    # Wrap in orders array as required by IBKR API
+    request_body = {"orders": [order_obj]}
     
     try:
         response = requests.post(
@@ -358,36 +425,123 @@ def place_market_orders(account_id, orders):
         )
         response.raise_for_status()
         
-        orders_response = response.json()
-        print("\n--- PLACE ORDERS RESPONSE ---")
-        print(json.dumps(orders_response, indent=4))
-        print("-----------------------------\n")
-        print(f"SUCCESS: Orders placed for account {account_id}.")
-        return orders_response
+        order_response = response.json()
+        print(f"\n--- PLACE ORDER RESPONSE ---")
+        print(json.dumps(order_response, indent=4))
+        print("---------------------------\n")
+        print(f"SUCCESS: Order submitted for conid {conid} ({quantity} shares {side})")
+        return order_response
         
     except requests.exceptions.RequestException as e:
-        print(f"An error occurred while placing orders: {e}")
+        print(f"ERROR: An error occurred while placing order for conid {conid}: {e}")
         return None
 
 
-# --- Main Execution ---
-if __name__ == "__main__":
-    if check_auth_status():
-        ACCOUNT_ID = get_account_ids()
+def confirm_order_reply(reply_id, confirmed=True):
+    """Confirms an order reply (e.g., market data warning).
+    
+    Args:
+        reply_id: String. The reply ID from the order response.
+        confirmed: Boolean. True to confirm, False to cancel.
+    
+    Returns:
+        Response data from the API, or None if error
+    """
+    url = f"{BASE_URL}/iserver/reply/{reply_id}"
+    
+    request_body = {"confirmed": confirmed}
+    
+    print(f"\nConfirming order reply {reply_id}...")
+    
+    try:
+        response = requests.post(
+            url,
+            json=request_body,
+            headers=get_headers("POST", request_body),
+            verify=False,
+            timeout=10
+        )
+        response.raise_for_status()
         
-        if ACCOUNT_ID:
-            #get_account_summary(ACCOUNT_ID)
+        reply_response = response.json()
+        print(f"--- REPLY CONFIRMATION RESPONSE ---")
+        print(json.dumps(reply_response, indent=4))
+        print("----------------------------------\n")
+        
+        return reply_response
+        
+    except requests.exceptions.RequestException as e:
+        print(f"ERROR: An error occurred while confirming reply: {e}")
+        return None
+
+def get_live_orders(filters=None, force=False):
+    """Retrieves live orders for the account.
+    
+    Args:
+        filters: String. Filter by status ("submitted", "filled", "cancelled", comma-separated).
+        force: Boolean. Force a fresh request and clear cached behavior.
+    
+    Returns:
+        List of orders
+    """
+    url = f"{BASE_URL}/iserver/account/orders"
+    params = {}
+    
+    if filters:
+        params["filters"] = filters
+    if force:
+        params["force"] = "true"
+    
+    try:
+        response = requests.get(url, headers=get_headers("GET"), params=params, verify=False, timeout=10)
+        response.raise_for_status()
+        
+        data = response.json()
+        orders = data.get("orders", []) if isinstance(data, dict) else []
+        
+        print(f"\nFound {len(orders)} order(s)")
+        return orders
+        
+    except requests.exceptions.RequestException as e:
+        print(f"ERROR: {e}")
+        return []
+
+def get_order_status(order_id):
+    """Gets detailed status of a specific order.
+    
+    Args:
+        order_id: String. The order ID to check.
+    
+    Returns:
+        Order status data
+    """
+    url = f"{BASE_URL}/iserver/account/order/{order_id}"
+    
+    print(f"Getting order status for {order_id}: GET {url}")
+    
+    try:
+        response = requests.get(url, headers=get_headers("GET"), verify=False, timeout=10)
+        response.raise_for_status()
+        
+        order_data = response.json()
+        
+        print("\n--- ORDER STATUS RESPONSE ---")
+        print(json.dumps(order_data, indent=4))
+        print("----------------------------\n")
+        
+        if order_data:
+            status = order_data.get("status", "N/A")
+            qty = order_data.get("quantity", 0)
+            filled = order_data.get("filledQuantity", 0)
+            remaining = qty - filled
             
-            # Fetch current positions
-            get_positions(ACCOUNT_ID, page_id=0, period="1D")
-            
-            # Place market buy orders: AZN, B, IGLN, NVDA with $1000 each
-            orders = [
-                {"conid": 4521593, "side": "BUY", "cashQty": 1000},   # AZN
-                {"conid": 780709675, "side": "BUY", "cashQty": 1000}, # B
-                {"conid": 86656182, "side": "BUY", "cashQty": 1000},  # IGLN
-                {"conid": 4815747, "side": "BUY", "cashQty": 1000},   # NVDA
-            ]
-            place_market_orders(ACCOUNT_ID, orders)
-            
-    print("Script execution complete.")
+            print(f"Order {order_id} Status: {status}")
+            print(f"  Quantity: {qty}")
+            print(f"  Filled: {filled}")
+            print(f"  Remaining: {remaining}")
+        
+        return order_data
+        
+    except requests.exceptions.RequestException as e:
+        print(f"ERROR: An error occurred while getting order status: {e}")
+        return None

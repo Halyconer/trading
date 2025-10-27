@@ -28,7 +28,15 @@ credentials.json
 account_*.txt
 config.local.py
 
+# IBKR Portal
+portal/
+portal_data/
+*.portal
+
 # Data files (optional)
 *.csv
 *.xlsx
 *.parquet
+
+# Logs
+*.log
