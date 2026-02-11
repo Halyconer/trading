@@ -184,8 +184,7 @@ def get_positions(account_id, conids=None, model=None, sort=None, direction=None
         print("ERROR: account_id is required")
         return None
     
-    # Use the newer portfolio2 endpoint for real-time data
-    url = f"{BASE_URL}/portfolio2/{account_id}/positions"
+    url = f"{BASE_URL}/portfolio/{account_id}/positions/0"
     print(f"Retrieving positions for {account_id}: GET {url}")
     
     # Build query parameters
@@ -217,10 +216,10 @@ def get_positions(account_id, conids=None, model=None, sort=None, direction=None
         if positions_data:
             print("Position Summary:")
             for pos in positions_data:
-                desc = pos.get("description", "Unknown")
+                desc = pos.get("contractDesc", pos.get("description", "Unknown"))
                 position = pos.get("position", 0)
-                mkt_price = pos.get("marketPrice", 0)
-                mkt_value = pos.get("marketValue", 0)
+                mkt_price = pos.get("mktPrice", pos.get("marketPrice", 0))
+                mkt_value = pos.get("mktValue", pos.get("marketValue", 0))
                 unrealized_pnl = pos.get("unrealizedPnl", 0)
                 currency = pos.get("currency", "USD")
                 
