@@ -338,7 +338,9 @@ def get_latest_price(conid):
     if market_data and isinstance(market_data, list) and len(market_data) > 0:
         price = market_data[0].get("31")
         if price:
-            return float(price)
+            # Strip currency prefix (e.g., "C97.4250" -> "97.4250")
+            price_str = str(price).lstrip("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+            return float(price_str)
     
     # Fallback to historical data if snapshot returns None
     print("  (Market data snapshot unavailable, trying historical data...)")

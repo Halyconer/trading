@@ -28,7 +28,7 @@ if __name__ == "__main__":
     
     # Step 2: Test with sample contract IDs
     # Using the real conids from search_contracts.py
-    test_conids = [4521593, 780709675, 86656182, 4815747]
+    test_conids = [851181134, 780709675, 86656182, 4815747]
     
     print("Testing market data retrieval for:")
     print(f"  - AZN (conid: 4521593)")

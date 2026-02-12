@@ -37,7 +37,7 @@ if __name__ == "__main__":
     print("=" * 70 + "\n")
     
     # Define which positions to check (your 4 stocks)
-    conids = [4521593, 780709675, 86656182, 4815747]  # AZN, B, IGLN, NVDA
+    conids = [851181134, 780709675, 86656182, 4815747]  # AZN, B, IGLN, NVDA
     
     positions = get_positions(account_id, conids=conids)
     
