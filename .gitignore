@@ -43,3 +43,6 @@ portal_data/
 
 # Runtime state (contains account ID + positions)
 state.json
+
+# Local venv
+.venv/
