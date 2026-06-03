@@ -40,3 +40,6 @@ portal_data/
 
 # Logs
 *.log
+
+# Runtime state (contains account ID + positions)
+state.json

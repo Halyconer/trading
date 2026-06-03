@@ -12,9 +12,12 @@ Usage:
     python ibkr_stuff/risk_parity_monitor.py
 """
 
+import json
 import logging
-import sys
 import math
+import os
+from datetime import datetime, timezone
+from pathlib import Path
 
 from ib_async import IB, util
 
@@ -24,6 +27,8 @@ from config import (
 )
 from notify import send as notify
 from risk_parity_calc import get_risk_parity_weights
+
+STATE_PATH = Path(__file__).resolve().parent.parent / "state.json"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -42,6 +47,20 @@ def _best_price(ticker) -> float | None:
         if val is not None and not math.isnan(val):
             return val
     return None
+
+
+def _write_state(account: str, positions: list[dict], total_value: float) -> None:
+    """Atomically write the latest portfolio snapshot to state.json."""
+    payload = {
+        "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "account": account,
+        "trading_mode": TRADING_MODE,
+        "total_value": round(total_value, 2),
+        "positions": positions,
+    }
+    tmp = STATE_PATH.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(payload, indent=2))
+    os.replace(tmp, STATE_PATH)
 
 
 def _format_drift_report(drifts: list[dict]) -> str:
@@ -132,6 +151,7 @@ def run():
 
     def check_drift():
         total_value = 0.0
+        prices: dict[str, float] = {}
         holdings: dict[str, float] = {}
 
         for sym in tickers_list:
@@ -139,6 +159,7 @@ def run():
             if price is None:
                 log.warning("  %s — no price yet, skipping check", sym)
                 return
+            prices[sym] = price
             mv = pos_map[sym]["qty"] * price
             holdings[sym] = mv
             total_value += mv
@@ -148,10 +169,20 @@ def run():
             return
 
         drifts: list[dict] = []
+        state_positions: list[dict] = []
         for sym in tickers_list:
             actual_pct = (holdings[sym] / total_value) * 100
             target_pct = target_weights[sym] * 100
             diff = actual_pct - target_pct
+            state_positions.append({
+                "symbol": sym,
+                "quantity": pos_map[sym]["qty"],
+                "price": round(prices[sym], 4),
+                "market_value": round(holdings[sym], 2),
+                "weight_actual_pct": round(actual_pct, 2),
+                "weight_target_pct": round(target_pct, 2),
+                "drift_pct": round(diff, 2),
+            })
             if abs(diff) > DRIFT_THRESHOLD_PCT:
                 drifts.append({
                     "symbol": sym,
@@ -161,6 +192,8 @@ def run():
                     "dollar": (diff / 100) * total_value,
                 })
             log.info("  %s  actual=%.1f%%  target=%.1f%%  diff=%+.1f%%", sym, actual_pct, target_pct, diff)
+
+        _write_state(account, state_positions, total_value)
 
         if drifts:
             log.warning("Drift threshold breached for %d position(s)", len(drifts))

@@ -1,66 +1,36 @@
-# Finance Portfolio Tools
+# Finance
 
-Risk parity portfolio optimization and IBKR API integration tools.
+Personal portfolio tooling on top of Interactive Brokers via [`ib_async`](https://github.com/erdewit/ib_async).
 
-## Files
-
-- **`risk_parity.py`** — Calculate risk parity weights using historical market data
-- **`ibkr_api.py`** — Interactive Brokers Client Portal API wrapper
-- **`search_contracts.py`** — Search for contract IDs (conids) by symbol
-- **Test files** — Testing utilities for market data and snapshots
+The live risk-parity monitor is the foundation: it holds an IB Gateway session, streams prices for current positions, and writes a `state.json` snapshot that downstream consumers (alerts, news ingest, public portfolio site) can read without opening their own IB session.
 
 ## Setup
 
 1. Install dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+2. Copy the env template and fill it in:
+   ```bash
+   cp .env.example .env
+   ```
+
+3. Start **IB Gateway** (paper on port 4002, live on 4001) and log in.
+
+## Run the monitor
+
 ```bash
-pip install -r requirements.txt
+python ibkr_stuff/risk_parity_monitor.py
 ```
 
-2. Create your local `.env` file from the template:
-```bash
-cp .env.example .env
-```
+Connects to IB Gateway, subscribes to streaming market data for every open position, computes risk-parity target weights once at startup, then re-checks drift every `CHECK_INTERVAL_SECS`. Sends an ntfy.sh push notification when any position drifts beyond `DRIFT_THRESHOLD_PCT`. After each check it writes `state.json` at the repo root.
 
-3. Edit `.env` and add your IBKR account ID:
-```env
-ACCOUNT_ID=YOUR_ACCOUNT_ID
-CONID_AZN=4521593
-CONID_B=780709675
-CONID_IGLN=86656182
-CONID_NVDA=4815747
-```
+## Other scripts in `ibkr_stuff/`
 
-4. Ensure the **IBKR Client Portal Gateway** is running on `https://localhost:5002`
-
-## Usage
-
-### Risk Parity Calculation
-```bash
-python risk_parity.py
-```
-
-Returns optimal portfolio weights that equalize risk contribution across assets.
-
-### Search for Contract IDs
-```bash
-python search_contracts.py
-```
-
-Searches for available contracts by symbol (e.g., AZN, NVDA, IGLN).
-
-### Test Market Data
-```bash
-python test_snapshot.py
-```
-
-Tests connection to IBKR API and retrieves live market snapshots.
-
-## Security Notes
-
-- The IBKR API integration uses `verify=False` for SSL because it connects to a **local gateway** on localhost:5002
-- Never commit your account ID to version control
-- Use environment variables for sensitive configuration in production
-
-## License
-
-MIT
+- `mirror_positions.py` — replicate a hard-coded position list into the paper account (dry-run by default; `--execute` to place orders).
+- `place_orders.py` / `order_tracker.py` — order placement and status helpers.
+- `search_contracts.py` — look up IB contract IDs by symbol.
+- `risk_parity_calc.py` — covariance + SLSQP risk-parity weight solver, fed by IB historical data.
+- `notify.py` — thin ntfy.sh wrapper.
+- `config.py` — env-driven config shared by all of the above.
