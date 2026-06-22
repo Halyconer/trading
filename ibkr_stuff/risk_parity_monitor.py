@@ -13,11 +13,11 @@ Two run modes:
     # long-lived: one check, then every CHECK_INTERVAL_SECS (interactive)
     python ibkr_stuff/risk_parity_monitor.py
 
-    # single check then exit, for the hourly systemd timer (ib-risk-parity)
+    # single check then exit, for the daily systemd timer (ib-risk-parity)
     python ibkr_stuff/risk_parity_monitor.py --once
 
 In --once mode the "monitor started" notification is suppressed (so the
-hourly timer doesn't spam it) and the process exits non-zero if it can't
+daily timer doesn't add a second push) and the process exits non-zero if it can't
 connect or value the portfolio — surfacing a logged-out gateway as a
 systemd `failed` state, the same way snapshot_positions.py does.
 """
@@ -133,7 +133,7 @@ def run(once: bool = False):
         log.info("  %s  target=%.2f%%", sym, target_weights[sym] * 100)
 
     if not once:
-        # A one-shot timer run shouldn't fire a "started" push every hour —
+        # A one-shot timer run shouldn't fire a "started" push on every run —
         # only the rebalance alert below should notify.
         notify(
             "Risk parity monitor started — "
@@ -228,6 +228,6 @@ if __name__ == "__main__":
         description="Risk-parity portfolio drift check.")
     parser.add_argument(
         "--once", action="store_true",
-        help="Run a single drift check and exit (for the hourly systemd timer).")
+        help="Run a single drift check and exit (for the daily systemd timer).")
     args = parser.parse_args()
     run(once=args.once)
