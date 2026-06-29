@@ -36,9 +36,10 @@ from ib_async import IB, util
 from config import (
     IB_HOST, IB_PORT, IB_CLIENT_ID, TRADING_MODE,
     DRIFT_THRESHOLD_PCT, CHECK_INTERVAL_SECS,
+    CASH_TICKERS, STOP_LOSS_PCT,
 )
 from notify import send as notify
-from risk_parity_calc import get_risk_parity_weights
+from risk_parity_calc import fetch_price_frame, weights_from_prices
 
 STATE_PATH = Path(__file__).resolve().parent.parent / "state.json"
 
@@ -66,6 +67,27 @@ def _write_state(account: str, positions: list[dict], total_value: float) -> Non
     os.replace(tmp, STATE_PATH)
 
 
+def _archive_snapshot() -> None:
+    """
+    Append the snapshot just written to state.json into the DuckDB warehouse, so
+    a queryable history accumulates run-over-run. Best-effort: the warehouse is
+    research storage, not part of the alerting contract, so any failure here
+    (duckdb missing, disk issue) is logged and swallowed — it must never stop
+    the drift / stop-loss alerts. Lazy import keeps duckdb off the critical path
+    for clients that don't have it (e.g. the Mac).
+    """
+    try:
+        from warehouse import connect, ingest_state
+        con = connect()
+        try:
+            added = ingest_state(con)
+        finally:
+            con.close()
+        log.info("Warehouse: +%d row(s) archived to DuckDB", added)
+    except Exception as e:
+        log.warning("Warehouse archive skipped (non-fatal): %s", e)
+
+
 def _format_drift_report(drifts: list[dict]) -> str:
     """Build a human-readable notification body from a list of drift dicts."""
     lines = ["Portfolio drift detected:\n"]
@@ -74,6 +96,17 @@ def _format_drift_report(drifts: list[dict]) -> str:
         lines.append(
             f"  {d['symbol']}: {d['actual']:.1f}% vs target {d['target']:.1f}% "
             f"(off by {abs(d['diff']):.1f}%) → {direction} ~${abs(d['dollar']):.0f}"
+        )
+    return "\n".join(lines)
+
+
+def _format_stop_report(stops: list[dict]) -> str:
+    """Human-readable body for the stop-loss recommender alert."""
+    lines = ["Positions down past your stop-loss vs cost — review:\n"]
+    for s in stops:
+        lines.append(
+            f"  {s['symbol']}: down {s['loss']:.1f}% vs cost "
+            f"(paid ${s['cost']:.2f}, now ${s['price']:.2f})"
         )
     return "\n".join(lines)
 
@@ -125,19 +158,30 @@ def run(once: bool = False):
             break
         ib.sleep(1)
 
-    # ── target weights (computed once) ───────────────────────────────
-    log.info("Computing risk-parity target weights (IB historical data) …")
+    # ── target weights + stop-loss drawdowns (one history fetch) ─────
+    # Cash-like tickers (CASH_TICKERS, e.g. SGOV) are kept OUT of the optimiser
+    # — a near-zero-vol asset can't be equal-risk-sized and would otherwise get
+    # a garbage target (the old "SELL SGOV" false alarm). Anything the optimiser
+    # actually sized is the "managed" risk sleeve; everything else (cash, or an
+    # asset IB had no history for) is pinned to its current weight in the drift
+    # math below, so it never raises a bogus rebalance alert.
+    log.info("Fetching IB history → risk-parity weights …")
     contracts = [pos_map[sym]["contract"] for sym in tickers_list]
-    target_weights = get_risk_parity_weights(ib, contracts)
-    for sym in tickers_list:
-        log.info("  %s  target=%.2f%%", sym, target_weights[sym] * 100)
+    prices_hist = fetch_price_frame(ib, contracts, exclude=CASH_TICKERS)
+    risky_weights = weights_from_prices(prices_hist)   # sums to 1 over the risky sleeve
+    managed = set(risky_weights)
+    pinned = [s for s in tickers_list if s not in managed]
+    log.info("Risk-parity sleeve: %s", ", ".join(f"{s} {risky_weights[s]*100:.1f}%"
+                                                  for s in sorted(managed)) or "none")
+    if pinned:
+        log.info("Pinned to current weight (cash / no history): %s", ", ".join(pinned))
 
     if not once:
         # A one-shot timer run shouldn't fire a "started" push on every run —
-        # only the rebalance alert below should notify.
+        # only the rebalance / stop-loss alerts below should notify.
         notify(
             "Risk parity monitor started — "
-            + ", ".join(f"{s} {target_weights[s]*100:.1f}%" for s in tickers_list),
+            + ", ".join(f"{s} {risky_weights[s]*100:.1f}%" for s in sorted(managed)),
             title="RP Monitor",
         )
 
@@ -154,6 +198,7 @@ def run(once: bool = False):
         total_value = 0.0
         prices: dict[str, float] = {}
         holdings: dict[str, float] = {}
+        costs: dict[str, float] = {}
 
         # Snapshot current marketPrice / marketValue per position from IB.
         items = {it.contract.symbol: it for it in ib.portfolio()}
@@ -165,26 +210,45 @@ def run(once: bool = False):
                 return False
             prices[sym] = price
             holdings[sym] = item.marketValue  # qty × marketPrice, computed by IB
+            costs[sym] = item.averageCost     # your entry price (per share/coin) — your lot
             total_value += item.marketValue
 
         if total_value <= 0:
             log.warning("Total portfolio value is %.2f — skipping check", total_value)
             return False
 
+        # Pinned holdings (cash sleeve + any no-history asset) keep their current
+        # weight; the risk-parity targets fill only the remaining budget, so the
+        # two sets of targets add up to 100% and pinned assets show ~zero drift.
+        pinned_value = sum(holdings[s] for s in tickers_list if s not in managed)
+        risky_budget = max(0.0, 1 - pinned_value / total_value)
+
         drifts: list[dict] = []
+        stops: list[dict] = []
         state_positions: list[dict] = []
         for sym in tickers_list:
             actual_pct = (holdings[sym] / total_value) * 100
-            target_pct = target_weights[sym] * 100
+            if sym in managed:
+                target_pct = risky_weights[sym] * risky_budget * 100
+            else:
+                target_pct = actual_pct  # pinned: cash / no-data → no drift by design
             diff = actual_pct - target_pct
+
+            # Loss against YOUR cost basis (the lot you actually bought), not a
+            # market high you never traded at. Positive = underwater vs entry.
+            cost = costs[sym]
+            loss_pct = (cost - prices[sym]) / cost * 100 if cost > 0 else 0.0
+
             state_positions.append({
                 "symbol": sym,
                 "quantity": pos_map[sym]["qty"],
                 "price": round(prices[sym], 4),
+                "avg_cost": round(cost, 4),
                 "market_value": round(holdings[sym], 2),
                 "weight_actual_pct": round(actual_pct, 2),
                 "weight_target_pct": round(target_pct, 2),
                 "drift_pct": round(diff, 2),
+                "loss_vs_cost_pct": round(loss_pct, 2),
             })
             if abs(diff) > DRIFT_THRESHOLD_PCT:
                 drifts.append({
@@ -194,15 +258,30 @@ def run(once: bool = False):
                     "diff": diff,
                     "dollar": (diff / 100) * total_value,
                 })
-            log.info("  %s  actual=%.1f%%  target=%.1f%%  diff=%+.1f%%", sym, actual_pct, target_pct, diff)
+            # Stop-loss recommender: flag a risky holding now down more than
+            # STOP_LOSS_PCT from your average cost. Cash/pinned assets are
+            # exempt. This only *alerts* — it never places an order.
+            if STOP_LOSS_PCT > 0 and sym in managed and loss_pct >= STOP_LOSS_PCT:
+                stops.append({"symbol": sym, "loss": loss_pct,
+                              "cost": cost, "price": prices[sym]})
+            log.info("  %s  actual=%.1f%%  target=%.1f%%  diff=%+.1f%%  vs cost=%+.1f%%",
+                     sym, actual_pct, target_pct, diff, -loss_pct)
 
         _write_state(account, state_positions, total_value)
+        _archive_snapshot()
 
         if drifts:
             log.warning("Drift threshold breached for %d position(s)", len(drifts))
             notify(_format_drift_report(drifts), title="Rebalance Needed", priority=4, tags="warning")
         else:
             log.info("All positions within %.1f%% tolerance ✓", DRIFT_THRESHOLD_PCT)
+
+        if stops:
+            log.warning("Stop-loss threshold (%.0f%%) breached for %d position(s)",
+                        STOP_LOSS_PCT, len(stops))
+            notify(_format_stop_report(stops), title="Stop-Loss Alert", priority=5, tags="rotating_light")
+        else:
+            log.info("No position more than %.0f%% below your cost ✓", STOP_LOSS_PCT)
 
         return True
 

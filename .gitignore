@@ -43,6 +43,10 @@ portal_data/
 
 # Runtime state (contains account ID + positions)
 state.json
+# DuckDB research warehouse (account ID + position/price history)
+data/
+*.duckdb
+*.duckdb.wal
 positions.md
 snapshot.log
 

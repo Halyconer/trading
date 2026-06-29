@@ -33,15 +33,17 @@ def send(message: str, *, title: str = "IBKR Alert", priority: int = 3, tags: st
         print("  [notify] NTFY_TOPIC not set in .env — skipping.")
         return False
 
-    url = f"https://ntfy.sh/{NTFY_TOPIC}"
-
+    # ntfy only parses a JSON body when it's POSTed to the ROOT url with the
+    # topic *inside* the body. POSTing JSON to https://ntfy.sh/<topic> instead
+    # makes ntfy treat the whole raw JSON blob as the message text — which is
+    # why the phone showed literal braces, the tags list and escaped "\n".
     try:
-        resp = requests.post(url, json={
+        resp = requests.post("https://ntfy.sh/", json={
             "topic": NTFY_TOPIC,
             "title": title,
             "message": message,
             "priority": priority,
-            "tags": [tags],
+            "tags": [t.strip() for t in tags.split(",") if t.strip()],
         }, timeout=10)
 
         if resp.status_code == 200:
